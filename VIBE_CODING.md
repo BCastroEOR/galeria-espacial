@@ -2,9 +2,9 @@
 
 Este documento registra cómo se construyó la aplicación usando IA como copiloto de desarrollo.
 
-- **Herramienta(s) de IA:** _(ej. Claude, Cursor, Copilot)_
-- **Tiempo total aproximado:** _(ej. 6 horas)_
-- **Stack:** Next.js 16 (App Router) · TypeScript · Tailwind CSS · NASA APOD API · Vercel
+- **Herramienta(s) de IA:** Claude (Claude Code en VS Code)
+- **Tiempo total aproximado:** 4 horas (26 de noviembre de 2026)
+- **Stack:** Next.js 16 (App Router, Cache Components) · React 19 · TypeScript · Tailwind CSS 4 · Feed APOD de la NASA (`science.nasa.gov`) · pnpm · Vercel
 
 ---
 
@@ -22,7 +22,7 @@ Este documento registra cómo se construyó la aplicación usando IA como copilo
 | `/galeria` | Server + Client (filtro) | Cuadrícula de los últimos días |
 | `/galeria/[fecha]` | Server Component | Detalle de una foto |
 | `/favoritos` | Client Component | Favoritas guardadas en localStorage |
-| `/api/apod` | Route Handler | Proxy hacia la NASA (oculta la API key) |
+| `/api/apod` | Route Handler | Proxy hacia el feed APOD de la NASA (valida, normaliza y cachea) |
 
 ---
 
@@ -79,12 +79,12 @@ Crea un Route Handler en app/api/apod/route.ts que consulte https://api.nasa.gov
 - `src/lib/apod.ts` (marcado con `server-only` para que nunca llegue al navegador):
   - Tipos `ApodItem` (con `hdurl`, `thumbnail_url` y `copyright` opcionales, y `media_type: "image" | "video" | "other"`), `ApodQuery` y la clase `ApodError`, que lleva el código HTTP a devolver.
   - `parseApodQuery()`: valida los parámetros antes de llamar a la NASA. Revisa el formato `YYYY-MM-DD`, que la fecha no sea anterior a la primera APOD (1995-06-16), que `count` sea un entero entre 1 y 100, que no se combinen `count`, `date` y rango entre sí, que `end_date` venga con `start_date` y que el rango esté en orden.
-  - Llamada a la NASA con `api_key` del servidor, `thumbs=true` siempre y un timeout de 10 s.
+  - Llamada a la NASA desde el servidor, con `thumbs=true` siempre y un timeout de 10 s.
   - Funciones para Server Components: `getApod(date?)` y `getApodRange(start, end?)` (devuelve lo más reciente primero). Además, `queryApod()`, que usa el Route Handler.
 - `src/app/api/apod/route.ts`: `GET` que valida, consulta y responde JSON. Los errores tienen la forma `{ error, status }`.
 - `next.config.ts`: `images.remotePatterns` restringido a `apod.nasa.gov/apod/**` (http y https, porque algunas APOD antiguas usan http).
 
-Códigos HTTP: **400** por parámetros inválidos (propios o reportados por la NASA, como una fecha futura), **404** si no hay APOD para esa fecha, **429** si se alcanza el límite de peticiones, **500** si falta `NASA_API_KEY`, **502** si la NASA responde con error 5xx o la key es inválida, y **504** si la NASA no responde a tiempo.
+Códigos HTTP: **400** por parámetros inválidos (propios o reportados por la NASA, como una fecha futura), **404** si no hay APOD para esa fecha, **429** si se alcanza el límite de peticiones, **500** por un error de configuración del servidor, **502** si la NASA responde con un error, y **504** si la NASA no responde a tiempo.
 
 Ajustes que la IA hizo por su cuenta al aplicar la documentación de Next.js 16:
 - **`revalidate` → `'use cache'` + `cacheLife('hours')`:** con Cache Components activo, la opción `fetch(..., { next: { revalidate: 3600 } })` se reemplaza por una función con la directiva `'use cache'`. El perfil `hours` equivale a revalidar cada 3600 s.
@@ -92,7 +92,7 @@ Ajustes que la IA hizo por su cuenta al aplicar la documentación de Next.js 16:
 - **`count` sin caché:** `count` devuelve fotos aleatorias, así que esas consultas siempre van directo a la NASA.
 - **Corrección de tipos:** `cacheLife(cond ? 'hours' : 'seconds')` no compilaba por las sobrecargas de TypeScript. Se cambió a un `if/else`.
 
-Verificado con lint, build y pruebas reales del endpoint (`next start` + `curl`): 200 para una fecha, un rango y `count`; 400 en todas las validaciones; 400 de la NASA para una fecha futura. Al pedir la foto de **hoy**, la NASA respondió 500 (comprobado también con su `DEMO_KEY` pública), y el proxy lo devolvió correctamente como **502**.
+Verificado con lint, build y pruebas reales del endpoint (`next start` + `curl`): 200 para una fecha, un rango y `count`; 400 en todas las validaciones; 400 de la NASA para una fecha futura. Al pedir la foto de **hoy**, la NASA respondió 500 (comprobado también consultándola directamente), y el proxy lo devolvió correctamente como **502**.
 
 **Mi revisión / cambios:**
 - Observé que en las respuestas **no venía `thumbnail_url`** y que **todos los resultados tenían el mismo título**. La IA lo investigó consultando la API de la NASA directamente: el sitio `apod.nasa.gov` migró a `science.nasa.gov` y la API oficial ahora devuelve, de forma inestable, un contenido genérico (título "NASA Science", explicación genérica y el logo de la NASA como imagen). `thumbnail_url` solo aparece en videos, y el contenido genérico siempre viene como `"image"`.
@@ -140,7 +140,7 @@ Verificado con lint, build y en el navegador: portada, galería con 24 tarjetas,
   - `?per_page=N` → las N más recientes (máximo 25, valores mayores se ignoran).
   - `?date_from=YYMMDD&date_to=YYMMDD` → rango por fechas en formato **YYMMDD** (por ejemplo, `240701`), con ambos extremos incluidos, del más reciente al más antiguo; se pagina con `&page=` (encabezado `X-WP-TotalPages`).
   - `/apod-basic/YYMMDD` → una fecha concreta (404 si no existe).
-  - Campos: `url` es el **artículo**, no la imagen; la imagen está en `hdurl` (CDN `assets.science.nasa.gov`); `explanation` y `copyright` vienen en **HTML**; los videos no traen URL propia, y el video real (`<iframe>` de YouTube o `<source>` mp4) está dentro de `basic_html`. **No requiere API key.**
+  - Campos: `url` es el **artículo**, no la imagen; la imagen está en `hdurl` (CDN `assets.science.nasa.gov`); `explanation` y `copyright` vienen en **HTML**; los videos no traen URL propia, y el video real (`<iframe>` de YouTube o `<source>` mp4) está dentro de `basic_html`. **No requiere credenciales.**
 - Cambios aplicados:
   - `src/lib/apod.ts` reescrito para usar el nuevo feed, **manteniendo la misma interfaz** (`/api/apod` con `date`, `start_date`, `end_date`, `count`, y `getApod`, `getLatestApod`, `getRecentApods`, `getApodRange`). Incluye la normalización al tipo `ApodItem`: HTML → texto plano (quitando "Explanation:" y "Tomorrow's picture"), la imagen desde `hdurl`, la URL del video extraída de `basic_html` y los créditos limpios.
   - `count` (aleatorio) se implementa pidiendo fechas al azar en paralelo, porque el feed no tiene modo aleatorio; el máximo pasó de 100 a 25, como indica la documentación oficial. Se agregó un límite de 100 días por rango.
@@ -224,8 +224,7 @@ Ajustes que la IA hizo por su cuenta:
   6. **Videos mp4 sin portada:** ahora usan `poster` con la miniatura, `preload="metadata"` y `aria-label`.
   7. **Detalle sin título propio** en la pestaña: resuelto con `generateMetadata`.
 - Observaciones que quedan a mi criterio (no se cambiaron porque son archivos míos o decisiones de alcance):
-  - `README.md` y `.env.example` todavía mencionan `NASA_API_KEY`, que ya no se usa con el nuevo feed.
-  - En el repo hay **dos lockfiles** (`package-lock.json` y `pnpm-lock.yaml`); conviene dejar solo uno para que Vercel use un único gestor de paquetes.
+  - `README.md` y `.env.example` estaban desactualizados respecto al nuevo feed, y el repo tenía **dos lockfiles** (`package-lock.json` y `pnpm-lock.yaml`). *Resuelto después:* se actualizó el README (comandos con pnpm), se eliminó `.env.example` y se dejó solo `pnpm-lock.yaml`.
   - El feed trae un campo `alt` (descripción de la imagen) que no se usa: hoy el `alt` de las imágenes es el título. Usarlo mejoraría la accesibilidad.
   - La portada maneja su error en línea (sin "Reintentar"), porque el prompt pedía `error.tsx` solo en la galería y el detalle.
   - No hay pruebas automatizadas.
@@ -244,20 +243,22 @@ Verificado con `tsc`, lint, build y en el navegador: skeletons, 404 espacial (es
   - Los videos e iframes no esperan, porque no hay una imagen que cargar.
 - Verificado midiendo una línea de tiempo en el navegador al abrir una foto desde la galería: skeleton (0 ms) → llegan los datos y la imagen se descarga oculta, con el skeleton visible (1201 ms) → imagen cargada y skeleton retirado (1561 ms) → texto visible (1592 ms). **El texto nunca aparece antes que la imagen.** Con la imagen en caché (recarga directa) el skeleton tampoco se queda pegado.
 
-_(agrega más iteraciones si las hubo)_
 
 ---
 
 ## 3. Decisiones técnicas
 
-- **Route Handler como proxy:** la API key de la NASA vive solo en el servidor (`.env.local` / variables de Vercel) y nunca llega al navegador.
+- **Route Handler como proxy:** el navegador nunca consulta a la NASA directamente. `/api/apod` valida los parámetros, normaliza la respuesta al tipo `ApodItem`, cachea y devuelve códigos HTTP claros (400, 404, 429, 502, 504).
 - **Server Components para obtener datos:** la portada, la galería y el detalle se renderizan en el servidor → mejor rendimiento y SEO.
 - **Client Components solo donde hay interactividad:** filtro de fechas, botón de favorito y página de favoritos.
 - **localStorage para favoritos:** no requiere base de datos; se lee en `useEffect` para evitar errores de hidratación.
-- **Caché con `revalidate`:** la foto del día cambia una vez al día, así que se cachea para no gastar el límite de peticiones.
-- **Feed oficial de science.nasa.gov en lugar de api.nasa.gov:** tras la migración de la APOD, el feed de WordPress es la fuente con datos reales y no requiere API key. El Route Handler se mantiene como capa propia: valida, normaliza el formato a `ApodItem`, cachea y conserva la interfaz de la API clásica.
+- **Caché con `'use cache'` + `cacheLife('hours')`:** la foto del día cambia una vez al día, así que cada consulta exitosa se guarda 1 hora; los errores se guardan solo unos segundos para no "congelar" un fallo temporal.
+- **Feed oficial de science.nasa.gov en lugar de api.nasa.gov:** tras la migración de la APOD, el feed de WordPress es la fuente con datos reales y no necesita credenciales ni variables de entorno. El Route Handler se mantiene como capa propia: valida, normaliza el formato a `ApodItem`, cachea y conserva la interfaz de la API clásica.
 - **Estado conservado entre navegaciones (`<Activity>`):** con Cache Components, Next.js oculta las páginas en lugar de desmontarlas. Los estados de vista útiles (por ejemplo, la fecha escrita en el filtro) se conservan, y los transitorios (loaders, errores) se reinician al ocultar la página.
-- _(agrega las tuyas)_
+- **Partial Prerender con `<Suspense>`:** el "esqueleto" de cada página (navbar, encabezados, botones) se prerenderiza, y los datos de la NASA o los `params` dinámicos se cargan dentro de `<Suspense>` con skeletons.
+- **Manejo de errores por capas:** fechas inválidas o sin foto → `not-found.tsx` (404 espacial); fallos de la NASA → `error.tsx` con "Reintentar" (`retry()` de Next.js 16).
+- **Accesibilidad:** HTML válido (el corazón no va dentro del enlace), `aria-label` y `aria-pressed` en botones, contorno visible al navegar con teclado, `inert` en el menú móvil cerrado y animaciones desactivadas con `prefers-reduced-motion`.
+- **pnpm como gestor de paquetes:** un único lockfile (`pnpm-lock.yaml`), que Vercel detecta automáticamente.
 
 ---
 
@@ -265,27 +266,26 @@ _(agrega más iteraciones si las hubo)_
 
 | Desafío | Cómo lo detecté | Solución |
 |---|---|---|
-| Algunos días la APOD es un **video**, no una imagen | La tarjeta salía rota / vacía | Revisar `media_type` y mostrar miniatura (`thumbs=true`) o un `<iframe>` |
-| `next/image` rechazaba imágenes externas | Error en consola sobre host no configurado | Agregar `apod.nasa.gov` en `images.remotePatterns` de `next.config.ts` |
-| Error de hidratación al leer localStorage | Warning en consola | Mover la lectura a `useEffect` |
-| `params` es una Promesa en Next.js 15+ | La IA generó código con `params.fecha` directo | Usar `const { fecha } = await params` |
+| Algunos días la APOD es un **video**, no una imagen, y el nuevo feed no trae la URL del video ni miniatura | Revisando el JSON del feed: el video solo aparece dentro de `basic_html` | Extraer el `<iframe>` (YouTube) o el `<source>` (mp4) de `basic_html`; miniatura oficial de YouTube o el fotograma de portada; `<video>` con `poster` |
+| `next/image` rechazaba imágenes externas | Error `Invalid src prop … hostname "assets.science.nasa.gov" is not configured` al entrar a la galería | Agregar `assets.science.nasa.gov` (y `img.youtube.com`) en `images.remotePatterns` y convertir las miniaturas de 48×48 px a la imagen completa |
+| Riesgo de error de hidratación al leer localStorage | Requisito del prompt de la Iteración 4 | Leer `localStorage` solo en `useEffect`, después de hidratar; en el servidor el corazón siempre se muestra vacío |
+| `params` es una Promesa en Next.js 15+ y, con Cache Components, es un dato de la petición | Documentación de rutas dinámicas de Next.js 16 | Resolver `params` dentro de un `<Suspense>` (`params.then(...)`) para que el resto de la página se prerenderice |
 | `usePathname` en la navbar puede romper el build con Cache Components | Lectura de la documentación de Next.js 16 antes de codificar | Aislar la lectura de la ruta en un componente envuelto en `<Suspense>` con fallback sin estado activo |
 | `new Date()` en Server Components falla en el prerender | Documentación de Cache Components | Footer sin año dinámico; lo no determinista (`Math.random`) va solo en Client Components |
-| La API de la NASA devuelve 500 al pedir la foto de "hoy" cuando aún no está publicada | Prueba real del endpoint con `curl` (también falla con `DEMO_KEY`) | El proxy responde 502 (error del servicio externo, no nuestro); la portada deberá usar la foto del día anterior como respaldo |
-| La API oficial devuelve contenido genérico ("NASA Science") y sin `thumbnail_url` por la migración de APOD a science.nasa.gov | Observé que todos los títulos eran iguales; la IA lo confirmó consultando la NASA directamente | Detectarlo con `isPlaceholderApod()`, cachearlo poco tiempo, permitir imágenes de `science.nasa.gov` y mostrar un aviso en la UI |
-| Textos con caracteres rotos ("JesÃºs") | Revisión del JSON completo | Reparar la codificación (Latin-1 → UTF-8, hasta 3 pasadas) al normalizar la respuesta |
+| La API clásica devolvía 500 al pedir la foto de "hoy" | Prueba real del endpoint con `curl` | El proxy lo traduce a 502 (error del servicio externo); con el nuevo feed, la portada pide directamente la foto más reciente publicada |
+| La API clásica devuelve contenido genérico ("NASA Science") y sin `thumbnail_url` por la migración de APOD a science.nasa.gov | Observé que todos los títulos eran iguales; la IA lo confirmó consultando la NASA directamente | Primero se detectó y se mostró un aviso (`isPlaceholderApod()`); luego se resolvió de raíz migrando al feed oficial (fila siguiente) |
+| Textos con caracteres rotos ("JesÃºs") y con HTML | Revisión del JSON completo | Con la API clásica, reparar la codificación; con el feed nuevo, convertir el HTML a texto plano y limpiar espacios y prefijos ("Explanation:", "Image Credit:") |
 | La API clásica devuelve contenido genérico; el nuevo feed oficial no está documentado públicamente (la guía de Notion requiere JavaScript) | La app no mostraba nada; revisión del README de `nasa/apod-api` | Documentar el feed `science.nasa.gov/wp-json/wp/v2/apod-basic` probándolo directamente (fechas en formato YYMMDD, máximo 25 por página, HTML en los textos, video dentro de `basic_html`) y adaptar `lib/apod.ts` manteniendo la interfaz |
 | Al volver a la galería, el botón "Foto aleatoria" seguía mostrando el loader | Lo detecté probando la navegación de ida y vuelta | Next.js 16 conserva las páginas ocultas con `<Activity>`; los estados transitorios se reinician en la limpieza de un `useLayoutEffect` |
 | Los `error.tsx` nunca se activaban porque las páginas atrapaban los errores | Revisión del flujo de errores al implementar la Iteración 5 | Propagar los errores inesperados (los 404 siguen en `notFound()`); el cacheo corto de errores evita que rompan el build |
 | En Next.js 16 `error.tsx` recibe `retry` (no solo `reset`) y `error: unknown` | Documentación de `error.js` | Usar `retry()` dentro de `useTransition` para que el botón no se quede en "Reintentando…" |
-| El lint de React marcó `setState` dentro de `useEffect` (`react-hooks/set-state-in-effect`) | `npm run lint` | Un solo estado `boolean \| null` sincronizado con `localStorage` por suscripción, y un `ref` para aplicar al `<input>` la fecha máxima dependiente del reloj |
+| El lint de React marcó `setState` dentro de `useEffect` (`react-hooks/set-state-in-effect`) | `pnpm lint` | Un solo estado `boolean \| null` sincronizado con `localStorage` por suscripción, y un `ref` para aplicar al `<input>` la fecha máxima dependiente del reloj |
 | Un botón de favorito dentro de una tarjeta que es enlace | Revisión del HTML: un `<button>` dentro de un `<a>` es inválido | Poner el corazón como hermano del enlace, superpuesto con `absolute` |
 | `priority` de `next/image` deprecado en Next.js 16 | Documentación de `next/image` | Usar `preload` |
 | `fetch` con `next.revalidate` ya no aplica con Cache Components | Documentación de Next.js 16 | `'use cache'` + `cacheLife('hours')`, y `cacheLife('seconds')` cuando hay error |
-| _(tu desafío real)_ | | |
 
 ---
 
 ## 5. Reflexión final
 
-_(3–5 líneas: qué hizo bien la IA, dónde se equivocó, qué aprendiste sobre dirigirla)_
+La IA fue muy útil para leer la documentación de Next.js 16 antes de escribir código, lo que evitó errores típicos de versiones anteriores (`params` como Promesa, `'use cache'` en lugar de `revalidate`, `retry` en `error.tsx`), y para investigar problemas reales, como la migración de la APOD a science.nasa.gov, probando el servicio directamente. Donde más se equivocó fue en suposiciones que solo se ven usando la app: el loader que no desaparecía al volver a la galería, el texto que saltaba al cargar la imagen o las tarjetas de distinta altura. Aprendí que dirigir a la IA funciona mejor con un ciclo corto de prompt → validación en el navegador → ajuste → commit, que mis observaciones concretas valen más que pedir "que funcione", y que cuando interpreta algo distinto a lo que quiero conviene interrumpirla y aclarar la intención de inmediato.
