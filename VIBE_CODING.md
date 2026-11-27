@@ -12,7 +12,7 @@ Este documento registra cómo se construyó la aplicación usando IA como copilo
 
 **Idea:** Galería web que muestra la *Astronomy Picture of the Day* de la NASA, permite explorar fotos de días anteriores, ver el detalle de cada una y guardar favoritas.
 
-**Por qué este tema:** _(escribe tu motivación en 1–2 líneas)_
+**Por qué este tema:** El espacio es un tema muy visual que invita a explorar, ideal para practicar una interfaz atractiva. Además, la APOD de la NASA es una API pública y gratuita que permite poner en práctica lo más importante de Next.js: obtener datos en el servidor, rutas dinámicas, Route Handlers, caché e interactividad en el cliente.
 
 **Arquitectura planificada antes de pedirle código a la IA:**
 
