@@ -198,9 +198,51 @@ Verificado con lint, build y en el navegador: estado vacío, guardar dos favorit
 ### Iteración 5 — Loading, error y responsive
 **Prompt:**
 ```
+Agrega loading.tsx con skeletons animados y error.tsx con un botón de reintentar en app/galeria y en app/galeria/[fecha], más un not-found.tsx con temática espacial. Revisa que todo sea responsive y agrega animaciones de entrada suaves. Revisa también el código completo y dime si hay errores de TypeScript o malas prácticas.
 ```
-**Resultado de la IA:**
+**Resultado de la IA:** La IA revisó la documentación de Next.js 16 sobre `loading.js`, `error.js`, `not-found.js` y `generateMetadata`. Luego generó:
+- **Skeletons animados** (`src/components/Skeletons.tsx`): componentes compartidos entre los `loading.tsx` y los `<Suspense>` de las páginas, para que los dos estados de carga sean idénticos. Tienen un brillo que recorre cada bloque (clase `.skeleton`).
+- **`loading.tsx`** en `app/galeria` (encabezado y 9 tarjetas) y en `app/galeria/[fecha]` (detalle).
+- **`error.tsx`** en `app/galeria` y `app/galeria/[fecha]`, con un componente compartido `ErrorState`: ilustración de un cometa, botón **"Reintentar"** (con spinner) y enlace para volver. Muestra el código de error (`digest`) y registra el error en consola.
+- **`app/not-found.tsx`**: un "404" donde el 0 es un planeta con anillo, un astronauta flotando, el mensaje "Perdido en el espacio" y botones a Inicio y Galería. Lo usan las rutas inexistentes y las fechas sin foto.
+- **Animaciones de entrada** (`globals.css`, como utilidades de Tailwind v4: `animate-fade-up`, `animate-fade-in`, `animate-float`): el texto del hero entra escalonado, la foto aparece con un desvanecido, las tarjetas de la galería y de favoritos entran una tras otra (40 ms entre cada una, máximo 0,5 s) y el detalle y los encabezados se deslizan suavemente. Todas se desactivan con `prefers-reduced-motion`.
+- **Título de pestaña por foto:** `generateMetadata` en el detalle ("A Beautiful Trifid · Galería del Espacio"), con descripción e imagen para cuando se comparte el enlace.
+
+Ajustes que la IA hizo por su cuenta:
+- **`retry` en lugar de `reset`:** en Next.js 16 `error.tsx` recibe `retry()`, que vuelve a pedir los datos y renderizar (el `reset()` clásico solo limpia el error), y el `error` es de tipo `unknown`.
+- **Los errores ahora llegan a `error.tsx`:** antes, la galería y el detalle atrapaban los errores y mostraban un aviso en línea, así que un `error.tsx` nunca se habría activado. Ahora los errores inesperados se propagan; la fecha inválida o sin foto sigue yendo a `notFound()`. Como los errores se cachean solo unos segundos, quedan fuera del prerender y **el build no se rompe aunque la NASA esté caída** (se comprobó). Se eliminó `ApodNotice`, que quedó sin uso.
+- **El botón "Reintentar" no se queda pegado:** usa `useTransition`, así que vuelve solo a su estado normal tanto si el reintento funciona como si vuelve a fallar.
+
+**Revisión del código completo:**
+- **TypeScript:** `tsc --noEmit` → **0 errores**. **ESLint:** sin errores ni advertencias.
+- Malas prácticas encontradas y corregidas:
+  1. **Accesibilidad del menú móvil:** cerrado, sus enlaces seguían recibiendo foco con Tab aunque no se veían. Se agregó `inert` cuando está cerrado.
+  2. **Código sin uso:** se eliminaron `getApodRange()` y `ApodNotice`, y `FAVORITES_EVENT` y `CardSkeleton` dejaron de exportarse.
+  3. **Constante duplicada:** la fecha de la primera APOD estaba repetida en dos archivos; ahora vive en `apod-utils.ts` como `FIRST_APOD_DATE`.
+  4. **Número mágico:** el `-mt-[72px]` del hero dependía del alto de la navbar; ahora usa la variable CSS `--nav-height`.
+  5. **Skeletons duplicados** en 3 páginas, unificados en `Skeletons.tsx`.
+  6. **Videos mp4 sin portada:** ahora usan `poster` con la miniatura, `preload="metadata"` y `aria-label`.
+  7. **Detalle sin título propio** en la pestaña: resuelto con `generateMetadata`.
+- Observaciones que quedan a mi criterio (no se cambiaron porque son archivos míos o decisiones de alcance):
+  - `README.md` y `.env.example` todavía mencionan `NASA_API_KEY`, que ya no se usa con el nuevo feed.
+  - En el repo hay **dos lockfiles** (`package-lock.json` y `pnpm-lock.yaml`); conviene dejar solo uno para que Vercel use un único gestor de paquetes.
+  - El feed trae un campo `alt` (descripción de la imagen) que no se usa: hoy el `alt` de las imágenes es el título. Usarlo mejoraría la accesibilidad.
+  - La portada maneja su error en línea (sin "Reintentar"), porque el prompt pedía `error.tsx` solo en la galería y el detalle.
+  - No hay pruebas automatizadas.
+
+**Responsive:** se revisó a 375 px (celular) la portada, la galería, el detalle, favoritos, el 404 y el menú hamburguesa. **No hay desbordamiento horizontal** en ninguna página. Se ajustó el filtro de fecha para que en móvil ocupe todo el ancho, igual que "Foto aleatoria".
+
+Verificado con `tsc`, lint, build y en el navegador: skeletons, 404 espacial (escritorio y móvil), y `error.tsx` de la galería y el detalle forzando una caída temporal de la NASA (el botón "Reintentar" muestra los skeletons y vuelve a la pantalla de error sin quedarse pegado). Luego se restauró el endpoint real y todo volvió a funcionar, sin errores en consola.
+
 **Mi revisión / cambios:**
+- Al ver el detalle de una foto noté un efecto raro: primero se mostraba el skeleton (bien), pero luego **aparecía solo el texto y, un segundo después, la imagen, que empujaba todo el texto de forma brusca**.
+- La IA empezó a resolverlo reservando el espacio de la imagen, pero **la interrumpí**: mi intención no era reservar el espacio, sino que **el skeleton se mantenga hasta que la imagen aparezca**.
+- Solución aplicada (`src/components/ImageReveal.tsx`):
+  - `RevealProvider`: mientras la imagen carga, muestra el skeleton del detalle y renderiza el contenido real oculto debajo (`opacity-0`, fuera del flujo, `inert`), para que la imagen empiece a descargarse de inmediato. Cuando la imagen termina, quita el skeleton y muestra **todo junto** (texto + imagen) con la animación de entrada.
+  - `RevealImage`: un `next/image` que avisa con `onLoad`. También avisa con `onError`, para que una imagen rota no deje el skeleton para siempre, y revisa `img.complete` al montarse, para el caso de una imagen en caché que termina de cargar antes de que React conecte `onLoad`.
+  - Red de seguridad: si la imagen tarda más de 10 s, el contenido se muestra igual.
+  - Los videos e iframes no esperan, porque no hay una imagen que cargar.
+- Verificado midiendo una línea de tiempo en el navegador al abrir una foto desde la galería: skeleton (0 ms) → llegan los datos y la imagen se descarga oculta, con el skeleton visible (1201 ms) → imagen cargada y skeleton retirado (1561 ms) → texto visible (1592 ms). **El texto nunca aparece antes que la imagen.** Con la imagen en caché (recarga directa) el skeleton tampoco se queda pegado.
 
 _(agrega más iteraciones si las hubo)_
 
@@ -234,6 +276,8 @@ _(agrega más iteraciones si las hubo)_
 | Textos con caracteres rotos ("JesÃºs") | Revisión del JSON completo | Reparar la codificación (Latin-1 → UTF-8, hasta 3 pasadas) al normalizar la respuesta |
 | La API clásica devuelve contenido genérico; el nuevo feed oficial no está documentado públicamente (la guía de Notion requiere JavaScript) | La app no mostraba nada; revisión del README de `nasa/apod-api` | Documentar el feed `science.nasa.gov/wp-json/wp/v2/apod-basic` probándolo directamente (fechas en formato YYMMDD, máximo 25 por página, HTML en los textos, video dentro de `basic_html`) y adaptar `lib/apod.ts` manteniendo la interfaz |
 | Al volver a la galería, el botón "Foto aleatoria" seguía mostrando el loader | Lo detecté probando la navegación de ida y vuelta | Next.js 16 conserva las páginas ocultas con `<Activity>`; los estados transitorios se reinician en la limpieza de un `useLayoutEffect` |
+| Los `error.tsx` nunca se activaban porque las páginas atrapaban los errores | Revisión del flujo de errores al implementar la Iteración 5 | Propagar los errores inesperados (los 404 siguen en `notFound()`); el cacheo corto de errores evita que rompan el build |
+| En Next.js 16 `error.tsx` recibe `retry` (no solo `reset`) y `error: unknown` | Documentación de `error.js` | Usar `retry()` dentro de `useTransition` para que el botón no se quede en "Reintentando…" |
 | El lint de React marcó `setState` dentro de `useEffect` (`react-hooks/set-state-in-effect`) | `npm run lint` | Un solo estado `boolean \| null` sincronizado con `localStorage` por suscripción, y un `ref` para aplicar al `<input>` la fecha máxima dependiente del reloj |
 | Un botón de favorito dentro de una tarjeta que es enlace | Revisión del HTML: un `<button>` dentro de un `<a>` es inválido | Poner el corazón como hermano del enlace, superpuesto con `absolute` |
 | `priority` de `next/image` deprecado en Next.js 16 | Documentación de `next/image` | Usar `preload` |

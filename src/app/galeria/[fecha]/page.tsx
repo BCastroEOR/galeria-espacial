@@ -1,12 +1,37 @@
-import Image from "next/image";
+import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
-import ApodNotice from "@/components/ApodNotice";
 import ApodPreview from "@/components/ApodPreview";
 import FavoriteButton from "@/components/FavoriteButton";
+import { RevealImage, RevealProvider } from "@/components/ImageReveal";
+import { DetailSkeleton } from "@/components/Skeletons";
 import { ApodError, getApod, isValidApodDate, type ApodItem } from "@/lib/apod";
 import { formatApodDate, isVideoFile } from "@/lib/apod-utils";
+
+/**
+ * Título y descripción de la pestaña (y de la vista previa al compartir) con
+ * los datos de la foto. Como la página ya se resuelve en la petición (params
+ * dentro de Suspense), la metadata se transmite junto con el contenido.
+ */
+export async function generateMetadata({
+  params,
+}: PageProps<"/galeria/[fecha]">): Promise<Metadata> {
+  const { fecha } = await params;
+  if (!isValidApodDate(fecha)) return { title: "Foto no encontrada" };
+  try {
+    const apod = await getApod(fecha);
+    const image = apod.media_type === "image" ? apod.url : apod.thumbnail_url;
+    return {
+      title: apod.title,
+      description: apod.explanation.slice(0, 160),
+      openGraph: image ? { images: [image] } : undefined,
+    };
+  } catch {
+    // El error real lo maneja la página (not-found.tsx o error.tsx)
+    return { title: formatApodDate(fecha) };
+  }
+}
 
 /**
  * En Next.js 16 `params` es una Promesa. Con Cache Components y sin
@@ -19,7 +44,7 @@ export default function DetallePage({ params }: PageProps<"/galeria/[fecha]">) {
     <article className="mx-auto w-full max-w-5xl px-4 py-10 sm:px-6">
       <Link
         href="/galeria"
-        className="mb-8 inline-flex items-center gap-2 text-sm text-slate-300 transition hover:text-white"
+        className="mb-8 inline-flex items-center gap-2 rounded text-sm text-slate-300 transition hover:text-white focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-indigo-300"
       >
         <span aria-hidden="true">←</span> Volver a la galería
       </Link>
@@ -33,6 +58,10 @@ export default function DetallePage({ params }: PageProps<"/galeria/[fecha]">) {
   );
 }
 
+/**
+ * Fecha inválida o sin foto → not-found.tsx (404 espacial).
+ * Cualquier otro error se propaga a galeria/[fecha]/error.tsx ("Reintentar").
+ */
 async function ApodDetail({ fecha }: { fecha: string }) {
   if (!isValidApodDate(fecha)) notFound();
 
@@ -44,15 +73,13 @@ async function ApodDetail({ fecha }: { fecha: string }) {
     if (err instanceof ApodError && (err.status === 404 || err.status === 400)) {
       notFound();
     }
-    return (
-      <ApodNotice title="No pudimos cargar esta foto" tone="error">
-        {err instanceof ApodError ? err.message : "Error desconocido"}
-      </ApodNotice>
-    );
+    throw err;
   }
 
+  // Si es una imagen, el skeleton sigue visible hasta que termine de cargar y
+  // luego aparece todo junto (así el texto no "salta" cuando llega la imagen)
   return (
-    <>
+    <RevealProvider skeleton={<DetailSkeleton />} waitForImage={apod.media_type === "image"}>
       <header className="mb-6">
         <time dateTime={apod.date} className="text-xs uppercase tracking-[0.3em] text-indigo-300">
           {formatApodDate(apod.date)}
@@ -88,7 +115,7 @@ async function ApodDetail({ fecha }: { fecha: string }) {
           )}
         </div>
       </div>
-    </>
+    </RevealProvider>
   );
 }
 
@@ -96,7 +123,7 @@ async function ApodDetail({ fecha }: { fecha: string }) {
 function ApodMediaFull({ apod }: { apod: ApodItem }) {
   if (apod.media_type === "image") {
     return (
-      <Image
+      <RevealImage
         src={apod.hdurl ?? apod.url}
         alt={apod.title}
         width={1600}
@@ -110,7 +137,15 @@ function ApodMediaFull({ apod }: { apod: ApodItem }) {
 
   if (apod.media_type === "video") {
     return isVideoFile(apod.url) ? (
-      <video src={apod.url} controls playsInline className="aspect-video w-full" />
+      <video
+        src={apod.url}
+        poster={apod.thumbnail_url}
+        controls
+        playsInline
+        preload="metadata"
+        aria-label={apod.title}
+        className="aspect-video w-full"
+      />
     ) : (
       <iframe
         src={apod.url}
@@ -126,21 +161,6 @@ function ApodMediaFull({ apod }: { apod: ApodItem }) {
   return (
     <div className="relative aspect-video">
       <ApodPreview item={apod} sizes="(min-width: 1024px) 1024px, 100vw" />
-    </div>
-  );
-}
-
-function DetailSkeleton() {
-  return (
-    <div className="animate-pulse">
-      <div className="h-3 w-40 rounded bg-white/10" />
-      <div className="mt-4 h-10 w-2/3 rounded bg-white/15" />
-      <div className="mt-6 aspect-video rounded-2xl bg-white/10" />
-      <div className="mt-8 space-y-3">
-        <div className="h-4 w-full rounded bg-white/10" />
-        <div className="h-4 w-full rounded bg-white/10" />
-        <div className="h-4 w-2/3 rounded bg-white/10" />
-      </div>
     </div>
   );
 }

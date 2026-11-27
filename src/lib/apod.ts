@@ -1,6 +1,7 @@
 import "server-only";
 import { cacheLife } from "next/cache";
 import type { ApodItem, ApodQuery } from "./apod-types";
+import { FIRST_APOD_DATE } from "./apod-utils";
 
 // Los tipos viven en apod-types.ts para poder importarlos también
 // desde Client Components (este archivo es solo de servidor).
@@ -18,7 +19,6 @@ export type { ApodItem, ApodQuery } from "./apod-types";
  */
 const APOD_ENDPOINT = "https://science.nasa.gov/wp-json/wp/v2/apod-basic";
 const PER_PAGE_MAX = 25; // el feed ignora valores mayores
-const FIRST_APOD_DATE = "1995-06-16"; // primera APOD publicada
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_COUNT = 25;
 const MAX_RANGE_DAYS = 100;
@@ -469,12 +469,4 @@ export async function getLatestApod(): Promise<ApodItem> {
 /** Las fotos de los últimos `days` días publicados (máx. 25), la más reciente primero. */
 export async function getRecentApods(days = 24): Promise<ApodItem[]> {
   return unwrap(await latestCached(days));
-}
-
-/** Fotos entre dos fechas (ambas incluidas), la más reciente primero. */
-export async function getApodRange(
-  startDate: string,
-  endDate: string,
-): Promise<ApodItem[]> {
-  return unwrap(await rangeCached(startDate, endDate));
 }

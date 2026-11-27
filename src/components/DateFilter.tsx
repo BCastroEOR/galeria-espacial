@@ -2,8 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useId, useRef, useState } from "react";
-
-const FIRST_APOD_DATE = "1995-06-16";
+import { FIRST_APOD_DATE } from "@/lib/apod-utils";
 
 /** Fecha local de hoy en formato YYYY-MM-DD. */
 function todayLocal() {
@@ -42,7 +41,7 @@ export default function DateFilter() {
   };
 
   return (
-    <form onSubmit={handleSubmit} className="flex flex-col gap-1.5">
+    <form onSubmit={handleSubmit} className="flex w-full flex-col gap-1.5 sm:w-auto">
       <label htmlFor={inputId} className="text-xs uppercase tracking-widest text-slate-400">
         Buscar por fecha
       </label>
@@ -56,7 +55,7 @@ export default function DateFilter() {
           onChange={handleChange}
           aria-invalid={outOfRange}
           aria-describedby={outOfRange ? `${inputId}-error` : undefined}
-          className="h-11 rounded-full border border-white/20 bg-white/10 px-4 text-sm text-white backdrop-blur-md [color-scheme:dark] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-300"
+          className="h-11 min-w-0 flex-1 rounded-full border border-white/20 bg-white/10 px-4 sm:flex-none text-sm text-white backdrop-blur-md [color-scheme:dark] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-300"
         />
         <button
           type="submit"

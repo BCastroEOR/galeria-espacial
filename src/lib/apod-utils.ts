@@ -1,5 +1,8 @@
 import type { ApodItem } from "./apod-types";
 
+/** Fecha de la primera APOD publicada. */
+export const FIRST_APOD_DATE = "1995-06-16";
+
 const dateFormatter = new Intl.DateTimeFormat("es", {
   day: "numeric",
   month: "long",

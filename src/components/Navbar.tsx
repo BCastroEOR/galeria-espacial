@@ -111,6 +111,9 @@ export default function Navbar() {
 
         <div
           id="mobile-menu"
+          // Cerrado, el menú solo se colapsa visualmente: `inert` evita que sus
+          // enlaces reciban foco con Tab o los anuncie un lector de pantalla
+          inert={!open}
           className={`grid overflow-hidden transition-[grid-template-rows] duration-300 md:hidden ${
             open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
           }`}

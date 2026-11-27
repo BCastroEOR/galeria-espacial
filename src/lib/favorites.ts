@@ -8,7 +8,7 @@ import type { ApodItem } from "./apod-types";
 
 const STORAGE_KEY = "galeria-espacial:favoritos";
 /** Evento para avisar a otros componentes de la misma pestaña que cambió la lista. */
-export const FAVORITES_EVENT = "favoritos:cambio";
+const FAVORITES_EVENT = "favoritos:cambio";
 
 export function readFavorites(): ApodItem[] {
   try {

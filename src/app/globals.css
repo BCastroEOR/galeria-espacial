@@ -3,6 +3,8 @@
 :root {
   --background: #02030a;
   --foreground: #e6e9f5;
+  /* Alto total de la navbar (pt-4 + h-14): la portada lo usa para quedar detrás del vidrio */
+  --nav-height: 72px;
 }
 
 @theme inline {
@@ -10,6 +12,82 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-inter);
   --font-display: var(--font-cormorant);
+}
+
+/* ---------- Animaciones (clases animate-fade-up, animate-fade-in, animate-float) ---------- */
+@theme {
+  --animate-fade-up: fade-up 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-fade-in: fade-in 0.8s ease-out both;
+  --animate-float: float 6s ease-in-out infinite;
+
+  @keyframes fade-up {
+    from {
+      opacity: 0;
+      transform: translateY(16px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes float {
+    0%,
+    100% {
+      transform: translateY(0) rotate(-6deg);
+    }
+    50% {
+      transform: translateY(-14px) rotate(6deg);
+    }
+  }
+}
+
+/* Skeleton con brillo que recorre el bloque */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background-color: rgb(255 255 255 / 0.08);
+}
+
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgb(255 255 255 / 0.08),
+    transparent
+  );
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* Respeta a quien prefiere menos movimiento: sin animaciones de entrada ni brillo */
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-up,
+  .animate-fade-in,
+  .animate-float {
+    animation: none;
+  }
+  .skeleton::after {
+    animation: none;
+  }
 }
 
 html {
