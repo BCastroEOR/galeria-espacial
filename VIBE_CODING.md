@@ -73,9 +73,36 @@ Verificado con `npm run lint` y `npm run build` sin errores.
 ### Iteración 2 — Route Handler y consumo de la API
 **Prompt:**
 ```
+Crea un Route Handler en app/api/apod/route.ts que consulte https://api.nasa.gov/planetary/apod usando process.env.NASA_API_KEY. Debe aceptar los query params date, start_date, end_date y count, y siempre enviar thumbs=true. Crea también lib/apod.ts con el tipo TypeScript ApodItem (date, title, explanation, url, hdurl, media_type, thumbnail_url, copyright) y funciones para usar desde Server Components con revalidate de 1 hora. Maneja los errores de la API con códigos HTTP correctos. Configura next.config.ts para permitir imágenes de apod.nasa.gov.
 ```
-**Resultado de la IA:**
+**Resultado de la IA:** La IA revisó la documentación de Next.js 16 sobre Route Handlers, `use cache`, `cacheLife` e imágenes remotas, y generó:
+- `src/lib/apod.ts` (marcado con `server-only` para que nunca llegue al navegador):
+  - Tipos `ApodItem` (con `hdurl`, `thumbnail_url` y `copyright` opcionales, y `media_type: "image" | "video" | "other"`), `ApodQuery` y la clase `ApodError`, que lleva el código HTTP a devolver.
+  - `parseApodQuery()`: valida los parámetros antes de llamar a la NASA. Revisa el formato `YYYY-MM-DD`, que la fecha no sea anterior a la primera APOD (1995-06-16), que `count` sea un entero entre 1 y 100, que no se combinen `count`, `date` y rango entre sí, que `end_date` venga con `start_date` y que el rango esté en orden.
+  - Llamada a la NASA con `api_key` del servidor, `thumbs=true` siempre y un timeout de 10 s.
+  - Funciones para Server Components: `getApod(date?)` y `getApodRange(start, end?)` (devuelve lo más reciente primero). Además, `queryApod()`, que usa el Route Handler.
+- `src/app/api/apod/route.ts`: `GET` que valida, consulta y responde JSON. Los errores tienen la forma `{ error, status }`.
+- `next.config.ts`: `images.remotePatterns` restringido a `apod.nasa.gov/apod/**` (http y https, porque algunas APOD antiguas usan http).
+
+Códigos HTTP: **400** por parámetros inválidos (propios o reportados por la NASA, como una fecha futura), **404** si no hay APOD para esa fecha, **429** si se alcanza el límite de peticiones, **500** si falta `NASA_API_KEY`, **502** si la NASA responde con error 5xx o la key es inválida, y **504** si la NASA no responde a tiempo.
+
+Ajustes que la IA hizo por su cuenta al aplicar la documentación de Next.js 16:
+- **`revalidate` → `'use cache'` + `cacheLife('hours')`:** con Cache Components activo, la opción `fetch(..., { next: { revalidate: 3600 } })` se reemplaza por una función con la directiva `'use cache'`. El perfil `hours` equivale a revalidar cada 3600 s.
+- **Los errores no se cachean una hora:** la función cacheada devuelve un resultado (`ok`/`error`) en lugar de lanzar una excepción, porque su salida debe ser serializable. Además, usa `cacheLife('seconds')` cuando hay error, para que un fallo temporal de la NASA no quede "congelado" durante una hora.
+- **`count` sin caché:** `count` devuelve fotos aleatorias, así que esas consultas siempre van directo a la NASA.
+- **Corrección de tipos:** `cacheLife(cond ? 'hours' : 'seconds')` no compilaba por las sobrecargas de TypeScript. Se cambió a un `if/else`.
+
+Verificado con lint, build y pruebas reales del endpoint (`next start` + `curl`): 200 para una fecha, un rango y `count`; 400 en todas las validaciones; 400 de la NASA para una fecha futura. Al pedir la foto de **hoy**, la NASA respondió 500 (comprobado también con su `DEMO_KEY` pública), y el proxy lo devolvió correctamente como **502**.
+
 **Mi revisión / cambios:**
+- Observé que en las respuestas **no venía `thumbnail_url`** y que **todos los resultados tenían el mismo título**. La IA lo investigó consultando la API de la NASA directamente: el sitio `apod.nasa.gov` migró a `science.nasa.gov` y la API oficial ahora devuelve, de forma inestable, un contenido genérico (título "NASA Science", explicación genérica y el logo de la NASA como imagen). `thumbnail_url` solo aparece en videos, y el contenido genérico siempre viene como `"image"`.
+- Me presentó tres opciones (adaptarnos a la API oficial, usar un mirror no oficial o solo documentarlo) y decidí **seguir con la API oficial y adaptarnos**. Cambios aplicados:
+  - `next.config.ts`: se agregó `science.nasa.gov/wp-content/**` a `remotePatterns`, porque ahora las imágenes vienen de ese host.
+  - `src/lib/apod-utils.ts`: nueva función `isPlaceholderApod()` para detectar el contenido genérico y mostrar un aviso en la UI (se puede usar en Server y Client Components).
+  - `src/lib/apod-types.ts`: los tipos se separaron del archivo `server-only` para poder importarlos desde Client Components (por ejemplo, en Favoritos).
+  - Las respuestas genéricas se cachean solo unos minutos (`cacheLife('minutes')`), no una hora, por si la NASA vuelve a devolver el contenido real.
+  - Al revisar la respuesta completa apareció un tercer problema: el `copyright` llegaba con caracteres rotos, doblemente mal codificado ("JesÃºs" en lugar de "Jesús"). Se agregó una normalización que repara la codificación y deja solo los campos de `ApodItem`.
+  - Durante el build se detectó que el `try/catch` del Route Handler atrapaba una señal interna de Next.js (la interrupción del prerender al leer `searchParams`). Se movió esa lectura fuera del `try`.
 
 ### Iteración 3 — Galería y página de detalle
 **Prompt:**
@@ -123,6 +150,10 @@ _(agrega más iteraciones si las hubo)_
 | `params` es una Promesa en Next.js 15+ | La IA generó código con `params.fecha` directo | Usar `const { fecha } = await params` |
 | `usePathname` en la navbar puede romper el build con Cache Components | Lectura de la documentación de Next.js 16 antes de codificar | Aislar la lectura de la ruta en un componente envuelto en `<Suspense>` con fallback sin estado activo |
 | `new Date()` en Server Components falla en el prerender | Documentación de Cache Components | Footer sin año dinámico; lo no determinista (`Math.random`) va solo en Client Components |
+| La API de la NASA devuelve 500 al pedir la foto de "hoy" cuando aún no está publicada | Prueba real del endpoint con `curl` (también falla con `DEMO_KEY`) | El proxy responde 502 (error del servicio externo, no nuestro); la portada deberá usar la foto del día anterior como respaldo |
+| La API oficial devuelve contenido genérico ("NASA Science") y sin `thumbnail_url` por la migración de APOD a science.nasa.gov | Observé que todos los títulos eran iguales; la IA lo confirmó consultando la NASA directamente | Detectarlo con `isPlaceholderApod()`, cachearlo poco tiempo, permitir imágenes de `science.nasa.gov` y mostrar un aviso en la UI |
+| Textos con caracteres rotos ("JesÃºs") | Revisión del JSON completo | Reparar la codificación (Latin-1 → UTF-8, hasta 3 pasadas) al normalizar la respuesta |
+| `fetch` con `next.revalidate` ya no aplica con Cache Components | Documentación de Next.js 16 | `'use cache'` + `cacheLife('hours')`, y `cacheLife('seconds')` cuando hay error |
 | _(tu desafío real)_ | | |
 
 ---
