@@ -1,17 +1,27 @@
 import "server-only";
 import { cacheLife } from "next/cache";
-
 import type { ApodItem, ApodQuery } from "./apod-types";
 
 // Los tipos viven en apod-types.ts para poder importarlos también
 // desde Client Components (este archivo es solo de servidor).
 export type { ApodItem, ApodQuery } from "./apod-types";
-export { isPlaceholderApod } from "./apod-utils";
-import { isPlaceholderApod } from "./apod-utils";
 
-// ---------------------------------------------------------------------------
-// Tipos
-// ---------------------------------------------------------------------------
+/*
+ * Fuente de datos: feed oficial de la APOD en science.nasa.gov (WordPress).
+ * La API clásica (api.nasa.gov/planetary/apod) se reconectó a este feed tras
+ * la migración del sitio APOD y devuelve contenido genérico; su repositorio
+ * se archiva el 1 de diciembre de 2026. Este feed no requiere API key.
+ *
+ *   GET /apod-basic?per_page=N                     → las N más recientes (máx. 25)
+ *   GET /apod-basic?date_from=YYMMDD&date_to=YYMMDD → rango (paginado con &page=)
+ *   GET /apod-basic/YYMMDD                         → una fecha (404 si no existe)
+ */
+const APOD_ENDPOINT = "https://science.nasa.gov/wp-json/wp/v2/apod-basic";
+const PER_PAGE_MAX = 25; // el feed ignora valores mayores
+const FIRST_APOD_DATE = "1995-06-16"; // primera APOD publicada
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_COUNT = 25;
+const MAX_RANGE_DAYS = 100;
 
 /** Error con el código HTTP que debe devolverse al cliente. */
 export class ApodError extends Error {
@@ -29,13 +39,8 @@ type ApodResult<T> =
   | { ok: false; status: number; message: string };
 
 // ---------------------------------------------------------------------------
-// Validación de parámetros
+// Fechas
 // ---------------------------------------------------------------------------
-
-const APOD_ENDPOINT = "https://api.nasa.gov/planetary/apod";
-const FIRST_APOD_DATE = "1995-06-16"; // primera APOD publicada
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const MAX_COUNT = 100;
 
 function isValidDate(value: string) {
   if (!DATE_RE.test(value)) return false;
@@ -43,8 +48,39 @@ function isValidDate(value: string) {
   return !Number.isNaN(d.getTime()) && d.toISOString().startsWith(value);
 }
 
+/** true si la fecha tiene formato válido y no es anterior a la primera APOD. */
+export function isValidApodDate(value: string) {
+  return isValidDate(value) && value >= FIRST_APOD_DATE;
+}
+
+/** "2024-07-04" → "240704" (formato que usa el feed; 95–99 = años 1990). */
+function toFeedDate(date: string) {
+  return date.slice(2).replaceAll("-", "");
+}
+
+function addDays(date: string, days: number) {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function daysBetween(start: string, end: string) {
+  return (Date.parse(end) - Date.parse(start)) / 86_400_000;
+}
+
+/** Hoy (YYYY-MM-DD) en la zona horaria de la NASA (hora del Este de EE. UU.). */
+function todayInNasaTimezone() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+  }).format(new Date());
+}
+
+// ---------------------------------------------------------------------------
+// Validación de parámetros (misma interfaz que la API clásica)
+// ---------------------------------------------------------------------------
+
 /**
- * Valida y normaliza los query params antes de llamar a la NASA.
+ * Valida y normaliza los query params de /api/apod.
  * Lanza ApodError(400) si la combinación no es válida.
  */
 export function parseApodQuery(params: URLSearchParams): ApodQuery {
@@ -95,133 +131,296 @@ export function parseApodQuery(params: URLSearchParams): ApodQuery {
   if (start_date && end_date && start_date > end_date) {
     throw new ApodError("'start_date' debe ser anterior a 'end_date'", 400);
   }
+  if (
+    start_date &&
+    end_date &&
+    daysBetween(start_date, end_date) >= MAX_RANGE_DAYS
+  ) {
+    throw new ApodError(`El rango no puede superar ${MAX_RANGE_DAYS} días`, 400);
+  }
 
   return { date, start_date, end_date, count };
 }
 
 // ---------------------------------------------------------------------------
-// Llamada a la NASA (sin caché)
+// Normalización: del formato del feed a ApodItem
 // ---------------------------------------------------------------------------
 
-/** Traduce el código de la NASA al código que debe ver nuestro cliente. */
-function mapUpstreamStatus(status: number): number {
-  if (status === 400) return 400; // parámetros inválidos (p. ej. fecha futura)
-  if (status === 404) return 404; // no hay APOD para esa fecha
-  if (status === 429) return 429; // límite de peticiones alcanzado
-  // 401/403 = API key inválida → problema de configuración del servidor
-  // 5xx = la NASA falló → somos un gateway que recibió una mala respuesta
-  return 502;
+type FeedItem = {
+  date: string;
+  title: string;
+  media_type: string;
+  explanation?: string;
+  copyright?: string;
+  credit?: string;
+  url: string; // permalink del artículo, no la imagen
+  hdurl?: string; // imagen (o fotograma de portada en videos)
+  basic_html?: string;
+};
+
+const ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+};
+
+function decodeEntities(text: string) {
+  return text.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (match, code: string) => {
+    if (code[0] === "#") {
+      const n =
+        code[1].toLowerCase() === "x"
+          ? parseInt(code.slice(2), 16)
+          : parseInt(code.slice(1), 10);
+      return Number.isNaN(n) ? match : String.fromCodePoint(n);
+    }
+    return ENTITIES[code.toLowerCase()] ?? match;
+  });
 }
 
-async function requestApod(
-  query: ApodQuery,
-): Promise<ApodResult<ApodItem | ApodItem[]>> {
-  const apiKey = process.env.NASA_API_KEY;
-  if (!apiKey) {
-    return {
-      ok: false,
-      status: 500,
-      message: "Falta configurar NASA_API_KEY en el servidor",
-    };
-  }
+/** Convierte el HTML del feed a texto plano conservando los saltos de párrafo. */
+function htmlToText(html: string) {
+  return decodeEntities(
+    html
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/p>/gi, "\n\n")
+      .replace(/<[^>]+>/g, ""),
+  )
+    .replace(/[ \t]+/g, " ")
+    // Los enlaces del HTML dejan espacios antes de la puntuación: "M20 ," → "M20,"
+    .replace(/ +([.,;:!?)])/g, "$1")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 
-  const url = new URL(APOD_ENDPOINT);
-  url.searchParams.set("api_key", apiKey);
-  url.searchParams.set("thumbs", "true");
-  for (const [key, value] of Object.entries(query)) {
-    if (value !== undefined) url.searchParams.set(key, String(value));
-  }
+function cleanExplanation(html: string) {
+  return htmlToText(html)
+    .replace(/^Explanation:\s*/i, "")
+    .replace(/\s*Tomorrow's picture:[\s\S]*$/i, "")
+    .trim();
+}
 
+function cleanCredit(html: string) {
+  return htmlToText(html)
+    .replace(
+      /^(Images?|Videos?|Illustrations?|Animations?)?\s*Credits?\s*(&|and)?\s*(Copyright)?\s*:\s*/i,
+      "",
+    )
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** URL del video dentro de basic_html: <iframe src> (YouTube/Vimeo) o <source src> (mp4). */
+function extractVideoUrl(html = "") {
+  const match =
+    html.match(/<iframe[^>]+src="([^"]+)"/i) ??
+    html.match(/<source[^>]+src="([^"]+)"/i) ??
+    html.match(/<video[^>]+src="([^"]+)"/i);
+  if (!match) return undefined;
+  const src = decodeEntities(match[1]);
+  return src.startsWith("//") ? `https:${src}` : src;
+}
+
+/** Miniatura oficial de YouTube a partir de la URL de embed. */
+function youtubeThumbnail(url?: string) {
+  const id = url?.match(/youtube(?:-nocookie)?\.com\/embed\/([\w-]{6,})/)?.[1];
+  return id ? `https://img.youtube.com/vi/${id}/hqdefault.jpg` : undefined;
+}
+
+/** Algunas entradas traen como portada una imagen genérica de la NASA. */
+function isGenericImage(url?: string) {
+  return !url || url.includes("/misc/news-thumbnail");
+}
+
+/**
+ * A veces hdurl apunta a una miniatura de 48×48 del gestor de contenidos:
+ *   .../content/dam/<ruta>.jpg/jcr:content/renditions/cq5dam.thumbnail.48.48.png
+ * Se convierte a la imagen completa del CDN:
+ *   .../dynamicimage/assets/<ruta>.jpg
+ */
+function fixImageUrl(url?: string) {
+  const match = url?.match(
+    /^https:\/\/assets\.science\.nasa\.gov\/content\/dam\/(.+?)\/jcr:content\/renditions\//,
+  );
+  return match
+    ? `https://assets.science.nasa.gov/dynamicimage/assets/${match[1]}`
+    : url;
+}
+
+function normalize(input: FeedItem): ApodItem {
+  const raw = { ...input, hdurl: fixImageUrl(input.hdurl) };
+  const isVideo = raw.media_type === "video" || raw.media_type === "iframe";
+  const videoUrl = isVideo ? extractVideoUrl(raw.basic_html) : undefined;
+  const credit = raw.copyright || raw.credit;
+
+  const item: ApodItem = {
+    date: raw.date,
+    title: decodeEntities(raw.title).trim(),
+    explanation: cleanExplanation(raw.explanation ?? ""),
+    // Imagen → hdurl. Video → su URL real; si no se encuentra, el artículo.
+    url: isVideo ? (videoUrl ?? raw.url) : (raw.hdurl ?? raw.url),
+    media_type: isVideo
+      ? "video"
+      : raw.media_type === "image"
+        ? "image"
+        : "other",
+  };
+  if (!isVideo && raw.hdurl) item.hdurl = raw.hdurl;
+  if (isVideo) {
+    const thumbnail =
+      youtubeThumbnail(videoUrl) ??
+      (isGenericImage(raw.hdurl) ? undefined : raw.hdurl);
+    if (thumbnail) item.thumbnail_url = thumbnail;
+  }
+  if (credit) item.copyright = cleanCredit(credit);
+  return item;
+}
+
+// ---------------------------------------------------------------------------
+// Llamadas al feed (sin caché)
+// ---------------------------------------------------------------------------
+
+function mapUpstreamStatus(status: number): number {
+  if (status === 400) return 400; // parámetros inválidos
+  if (status === 404) return 404; // no hay APOD para esa fecha
+  if (status === 429) return 429; // límite de peticiones alcanzado
+  return 502; // la NASA falló → somos un gateway que recibió una mala respuesta
+}
+
+const UPSTREAM_MESSAGES: Record<number, string> = {
+  400: "Parámetros no válidos para el servicio de la NASA",
+  404: "No hay foto astronómica para esa fecha",
+  429: "Se alcanzó el límite de peticiones a la NASA; intenta más tarde",
+};
+
+type FeedResponse = { body: FeedItem | FeedItem[]; totalPages: number };
+
+async function fetchFeed(path: string): Promise<ApodResult<FeedResponse>> {
   let res: Response;
   try {
-    res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    res = await fetch(`${APOD_ENDPOINT}${path}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
   } catch (err) {
     const timedOut = err instanceof DOMException && err.name === "TimeoutError";
     return {
       ok: false,
       status: timedOut ? 504 : 502,
       message: timedOut
-        ? "La API de la NASA tardó demasiado en responder"
-        : "No se pudo conectar con la API de la NASA",
+        ? "El servicio de la NASA tardó demasiado en responder"
+        : "No se pudo conectar con el servicio de la NASA",
     };
   }
 
   if (!res.ok) {
-    // La NASA responde { code, msg } o { error: { message } } según el caso
-    const body = await res.json().catch(() => null);
-    const upstreamMsg: string | undefined = body?.msg ?? body?.error?.message;
     const status = mapUpstreamStatus(res.status);
     return {
       ok: false,
       status,
       message:
-        status === 502
-          ? `La API de la NASA respondió con error (${res.status})`
-          : (upstreamMsg ?? `Error de la API de la NASA (${res.status})`),
+        UPSTREAM_MESSAGES[status] ??
+        `El servicio de la NASA respondió con error (${res.status})`,
     };
   }
 
-  const raw: RawApod | RawApod[] = await res.json();
   return {
     ok: true,
-    data: Array.isArray(raw) ? raw.map(normalizeApod) : normalizeApod(raw),
+    data: {
+      body: await res.json(),
+      totalPages: Number(res.headers.get("x-wp-totalpages") ?? 1),
+    },
   };
 }
 
-// ---------------------------------------------------------------------------
-// Normalización de la respuesta
-// ---------------------------------------------------------------------------
+const asList = (body: FeedItem | FeedItem[]) => [body].flat();
 
-type RawApod = ApodItem & Record<string, unknown>;
+async function requestByDate(date: string): Promise<ApodResult<ApodItem>> {
+  const r = await fetchFeed(`/${toFeedDate(date)}`);
+  if (!r.ok) return r;
+  const [raw] = asList(r.data.body);
+  if (!raw) return { ok: false, status: 404, message: UPSTREAM_MESSAGES[404] };
+  return { ok: true, data: normalize(raw) };
+}
 
-/**
- * Corrige texto UTF-8 que la API entrega mal decodificado como Latin-1
- * (p. ej. "JesÃºs" → "Jesús"). A veces viene codificado dos veces, así que
- * se repite hasta 3 veces. Si el texto no tiene ese problema, no se toca.
- */
-function fixMojibake(text: string): string {
-  let current = text;
-  for (let i = 0; i < 3 && /[ÃÂ]/.test(current); i++) {
-    const repaired = Buffer.from(current, "latin1").toString("utf8");
-    if (repaired.includes("�") || repaired === current) break;
-    current = repaired;
+/** Rango de fechas, recorriendo todas las páginas del feed. Más reciente primero. */
+async function requestRange(
+  start: string,
+  end: string,
+): Promise<ApodResult<ApodItem[]>> {
+  const items: ApodItem[] = [];
+  for (let page = 1; ; page++) {
+    const r = await fetchFeed(
+      `?date_from=${toFeedDate(start)}&date_to=${toFeedDate(end)}&per_page=${PER_PAGE_MAX}&page=${page}`,
+    );
+    if (!r.ok) return r;
+    items.push(...asList(r.data.body).map(normalize));
+    if (page >= r.data.totalPages) break;
   }
-  return current;
+  return { ok: true, data: items };
 }
 
-/** Deja solo los campos de ApodItem, con el texto limpio. */
-function normalizeApod(raw: RawApod): ApodItem {
-  const item: ApodItem = {
-    date: raw.date,
-    title: fixMojibake(raw.title).trim(),
-    explanation: fixMojibake(raw.explanation).trim(),
-    url: raw.url,
-    media_type: raw.media_type,
-  };
-  if (raw.hdurl) item.hdurl = raw.hdurl;
-  if (raw.thumbnail_url) item.thumbnail_url = raw.thumbnail_url;
-  if (raw.copyright) item.copyright = fixMojibake(raw.copyright).trim();
-  return item;
+/** Las `n` más recientes (n ≤ 25). */
+async function requestLatest(n: number): Promise<ApodResult<ApodItem[]>> {
+  const r = await fetchFeed(`?per_page=${Math.min(n, PER_PAGE_MAX)}`);
+  if (!r.ok) return r;
+  return { ok: true, data: asList(r.data.body).map(normalize) };
 }
+
+/** `count` fotos de fechas aleatorias (el feed no tiene un modo aleatorio). */
+async function requestRandom(count: number): Promise<ApodResult<ApodItem[]>> {
+  const span = daysBetween(FIRST_APOD_DATE, todayInNasaTimezone());
+  const dates = new Set<string>();
+  while (dates.size < count) {
+    dates.add(addDays(FIRST_APOD_DATE, Math.floor(Math.random() * span)));
+  }
+  const results = await Promise.all([...dates].map(requestByDate));
+  const items = results.flatMap((r) => (r.ok ? [r.data] : []));
+  if (items.length > 0) return { ok: true, data: items };
+  const firstError = results.find((r) => !r.ok);
+  return firstError && !firstError.ok
+    ? firstError
+    : { ok: false, status: 502, message: "No se pudieron obtener fotos" };
+}
+
+// ---------------------------------------------------------------------------
+// Caché: 1 hora en éxito, unos segundos en error
+// ---------------------------------------------------------------------------
 
 /**
- * Versión cacheada: los resultados exitosos se guardan 1 hora
- * (perfil 'hours': revalidate = 3600 s). Los errores se cachean solo
- * unos segundos para no "congelar" un fallo temporal durante una hora.
- * Devuelve un resultado en lugar de lanzar, porque la salida de un
+ * Los resultados exitosos se guardan 1 hora (perfil 'hours': revalidate = 3600 s).
+ * Los errores solo unos segundos, para no "congelar" un fallo temporal.
+ * Se devuelve un resultado en lugar de lanzar porque la salida de un
  * 'use cache' debe ser serializable.
  */
-async function requestApodCached(query: ApodQuery) {
-  "use cache";
-  const result = await requestApod(query);
-  if (!result.ok) {
-    cacheLife("seconds");
-  } else if ([result.data].flat().some(isPlaceholderApod)) {
-    // Contenido genérico de la NASA: reintentar pronto por si ya hay datos reales
-    cacheLife("minutes");
-  } else {
+function applyCacheLife(result: ApodResult<unknown>) {
+  if (result.ok) {
     cacheLife("hours");
+  } else {
+    cacheLife("seconds");
   }
+}
+
+async function byDateCached(date: string) {
+  "use cache";
+  const result = await requestByDate(date);
+  applyCacheLife(result);
+  return result;
+}
+
+async function rangeCached(start: string, end: string) {
+  "use cache";
+  const result = await requestRange(start, end);
+  applyCacheLife(result);
+  return result;
+}
+
+async function latestCached(n: number) {
+  "use cache";
+  const result = await requestLatest(n);
+  applyCacheLife(result);
   return result;
 }
 
@@ -235,30 +434,46 @@ function unwrap<T>(result: ApodResult<T>): T {
 // ---------------------------------------------------------------------------
 
 /**
- * Consulta genérica usada por el Route Handler.
- * Las consultas con 'count' devuelven fotos aleatorias, así que no se cachean.
+ * Consulta genérica usada por el Route Handler (/api/apod).
+ * Las consultas con 'count' son aleatorias, así que no se cachean.
  */
-export async function queryApod(query: ApodQuery) {
-  const result =
-    query.count !== undefined
-      ? await requestApod(query)
-      : await requestApodCached(query);
-  return unwrap(result);
+export async function queryApod(
+  query: ApodQuery,
+): Promise<ApodItem | ApodItem[]> {
+  if (query.count !== undefined) return unwrap(await requestRandom(query.count));
+  if (query.date) return unwrap(await byDateCached(query.date));
+  if (query.start_date) {
+    // Sin end_date: hasta MAX_RANGE_DAYS días después (el feed corta en hoy)
+    const end =
+      query.end_date ?? addDays(query.start_date, MAX_RANGE_DAYS - 1);
+    // Igual que la API clásica: orden ascendente
+    return [...unwrap(await rangeCached(query.start_date, end))].reverse();
+  }
+  return getLatestApod();
 }
 
-/** Foto del día (o de una fecha concreta). Para Server Components. */
+/** Foto de una fecha concreta (o la más reciente). Para Server Components. */
 export async function getApod(date?: string): Promise<ApodItem> {
-  return unwrap(await requestApodCached({ date })) as ApodItem;
+  if (!date) return getLatestApod();
+  return unwrap(await byDateCached(date));
 }
 
-/** Fotos entre dos fechas (ambas incluidas). Para Server Components. */
+/** La foto del día más reciente publicada. Para Server Components. */
+export async function getLatestApod(): Promise<ApodItem> {
+  const [latest] = unwrap(await latestCached(1));
+  if (!latest) throw new ApodError("No hay fotos disponibles", 502);
+  return latest;
+}
+
+/** Las fotos de los últimos `days` días publicados (máx. 25), la más reciente primero. */
+export async function getRecentApods(days = 24): Promise<ApodItem[]> {
+  return unwrap(await latestCached(days));
+}
+
+/** Fotos entre dos fechas (ambas incluidas), la más reciente primero. */
 export async function getApodRange(
   startDate: string,
-  endDate?: string,
+  endDate: string,
 ): Promise<ApodItem[]> {
-  const data = unwrap(
-    await requestApodCached({ start_date: startDate, end_date: endDate }),
-  ) as ApodItem[];
-  // La NASA devuelve orden ascendente; mostramos primero lo más reciente
-  return [...data].reverse();
+  return unwrap(await rangeCached(startDate, endDate));
 }
