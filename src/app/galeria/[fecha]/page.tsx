@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { Suspense } from "react";
 import ApodNotice from "@/components/ApodNotice";
 import ApodPreview from "@/components/ApodPreview";
+import FavoriteButton from "@/components/FavoriteButton";
 import { ApodError, getApod, isValidApodDate, type ApodItem } from "@/lib/apod";
 import { formatApodDate, isVideoFile } from "@/lib/apod-utils";
 
@@ -73,16 +74,19 @@ async function ApodDetail({ fecha }: { fecha: string }) {
           {apod.explanation}
         </p>
 
-        {apod.media_type === "image" && apod.hdurl && (
-          <a
-            href={apod.hdurl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-block rounded-full border border-white/20 bg-white/10 px-5 py-2.5 text-sm font-medium text-white backdrop-blur-md transition hover:bg-white/20"
-          >
-            Abrir imagen en resolución completa
-          </a>
-        )}
+        <div className="flex flex-wrap gap-3">
+          <FavoriteButton item={apod} variant="inline" />
+          {apod.media_type === "image" && apod.hdurl && (
+            <a
+              href={apod.hdurl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-block rounded-full border border-white/20 bg-white/10 px-5 py-2.5 text-sm font-medium text-white backdrop-blur-md transition hover:bg-white/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-300"
+            >
+              Abrir imagen en resolución completa
+            </a>
+          )}
+        </div>
       </div>
     </>
   );

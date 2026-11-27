@@ -191,6 +191,7 @@ function htmlToText(html: string) {
     .replace(/[ \t]+/g, " ")
     // Los enlaces del HTML dejan espacios antes de la puntuación: "M20 ," → "M20,"
     .replace(/ +([.,;:!?)])/g, "$1")
+    .replace(/\( +/g, "(")
     .replace(/ *\n */g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();

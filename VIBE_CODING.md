@@ -165,9 +165,35 @@ Verificado con lint, build y en el navegador: portada, galería con 24 tarjetas,
 ### Iteración 4 — Favoritos (useState + useEffect)
 **Prompt:**
 ```
+Agrega:
+1. Un componente cliente FavoriteButton (corazón) que guarde y quite fotos en localStorage, usando useState y useEffect para evitar errores de hidratación.
+2. app/favoritos/page.tsx como Client Component que lea los favoritos con useEffect y los muestre con ApodCard, con un estado vacío bonito si no hay ninguno.
+3. En la galería, un filtro cliente con un input de fecha que navegue a /galeria/[fecha].
+4. Un botón "Foto aleatoria" que llame a /api/apod?count=1 desde el cliente y redirija al detalle.
 ```
 **Resultado de la IA:**
+- `src/lib/favorites.ts`: lectura y escritura de favoritos en `localStorage` (clave `galeria-espacial:favoritos`, se guarda el `ApodItem` completo para poder mostrar la tarjeta sin volver a llamar a la API). Tolera JSON corrupto o almacenamiento bloqueado. Emite un evento propio y escucha el evento `storage`, para que todos los corazones y la página de favoritos se actualicen solos, incluso entre pestañas.
+- `src/components/FavoriteButton.tsx` (Client Component): corazón con `useState` + `useEffect`. En el servidor y en el primer render siempre se muestra "no favorito" (deshabilitado), y el valor real se lee de `localStorage` en `useEffect`, después de hidratar, lo que evita errores de hidratación. Tiene dos variantes: un botón redondo sobre las tarjetas y un botón con texto ("Guardar en favoritos" / "En favoritos") en el detalle. Usa `aria-pressed` y un `aria-label` con el título de la foto.
+- `ApodCard`: el corazón se agregó como **hermano** del enlace y no dentro de él, porque un `<button>` dentro de un `<a>` es HTML inválido y además haría que el clic abriera el detalle.
+- `src/app/favoritos/page.tsx` (Client Component): lee los favoritos en `useEffect` y los muestra con `ApodCard`, con contador de fotos. Mientras no se ha leído `localStorage` muestra un esqueleto, para que alguien con favoritos no vea por un instante el estado vacío. El estado vacío es un planeta con anillo y un corazón, con un mensaje y un botón "Explorar la galería". Si se quita un favorito, desaparece de la lista en el momento.
+- `src/app/favoritos/layout.tsx`: define el título de la pestaña ("Favoritos · Galería del Espacio"), porque un Client Component no puede exportar `metadata`.
+- `src/components/DateFilter.tsx` (Client Component): `<input type="date">` con mínimo 16/06/1995 y máximo hoy, validación con mensaje accesible (`aria-invalid`, `aria-describedby`) y navegación con `router.push('/galeria/[fecha]')`.
+- `src/components/RandomApodButton.tsx` (Client Component): llama a `/api/apod?count=1` con `fetch` desde el navegador, muestra un spinner ("Buscando…") y redirige al detalle; si falla, muestra el error con `role="alert"`.
+- La galería muestra el filtro y el botón aleatorio junto al título, y el detalle muestra el botón de favorito junto a "Abrir imagen en resolución completa".
+
+Ajustes que la IA hizo por su cuenta:
+- **Regla del lint de React `set-state-in-effect`:** la primera versión llamaba a `setState` directamente dentro de `useEffect` y el lint lo marcó como error, porque provoca renders en cascada. Se corrigió **sin desactivar la regla** y manteniendo `useState` + `useEffect`:
+  - En `FavoriteButton`, un solo estado `boolean | null` (`null` = aún no leído) en lugar de dos estados; el efecto solo sincroniza con `localStorage` y se suscribe a sus cambios.
+  - En `DateFilter`, la fecha máxima (que depende del reloj del navegador) se aplica directamente al `<input>` mediante un `ref` en el efecto, y la validación se hace en el manejador de cambios.
+- Al probar la foto aleatoria apareció un crédito con un espacio sobrante después del paréntesis ("( PSU)"); se corrigió en la normalización de textos.
+
+Verificado con lint, build y en el navegador: estado vacío, guardar dos favoritos desde la galería (el clic en el corazón no abre el detalle), verlos en `/favoritos`, quitar uno (desaparece en el momento), filtro por fecha hacia `/galeria/2024-07-04` y foto aleatoria (llevó a `/galeria/2003-07-03`), sin errores de hidratación ni de consola.
+
 **Mi revisión / cambios:**
+- Detecté que al dar clic en **"Foto aleatoria"** aparece el loader y me redirige bien, pero **al regresar a la galería el loader se queda visible todo el tiempo**.
+- La IA revisó la guía de Next.js 16 *Preserving UI state* y encontró la causa: con Cache Components, Next.js **no desmonta** la página al navegar, sino que la oculta con el componente `<Activity>` de React y conserva su estado (hasta 3 rutas). Por eso, al volver, el botón seguía con `loading = true`.
+- Solución, siguiendo la recomendación de la documentación para estados transitorios: un `useLayoutEffect` con función de limpieza en `RandomApodButton`, que reinicia `loading` y `error` cuando la página se oculta.
+- Verificado en el navegador: al volver con el botón "Atrás" y con el enlace "Volver a la galería", el botón aparece normal ("Foto aleatoria") y se puede usar de nuevo.
 
 ### Iteración 5 — Loading, error y responsive
 **Prompt:**
@@ -188,6 +214,7 @@ _(agrega más iteraciones si las hubo)_
 - **localStorage para favoritos:** no requiere base de datos; se lee en `useEffect` para evitar errores de hidratación.
 - **Caché con `revalidate`:** la foto del día cambia una vez al día, así que se cachea para no gastar el límite de peticiones.
 - **Feed oficial de science.nasa.gov en lugar de api.nasa.gov:** tras la migración de la APOD, el feed de WordPress es la fuente con datos reales y no requiere API key. El Route Handler se mantiene como capa propia: valida, normaliza el formato a `ApodItem`, cachea y conserva la interfaz de la API clásica.
+- **Estado conservado entre navegaciones (`<Activity>`):** con Cache Components, Next.js oculta las páginas en lugar de desmontarlas. Los estados de vista útiles (por ejemplo, la fecha escrita en el filtro) se conservan, y los transitorios (loaders, errores) se reinician al ocultar la página.
 - _(agrega las tuyas)_
 
 ---
@@ -206,6 +233,9 @@ _(agrega más iteraciones si las hubo)_
 | La API oficial devuelve contenido genérico ("NASA Science") y sin `thumbnail_url` por la migración de APOD a science.nasa.gov | Observé que todos los títulos eran iguales; la IA lo confirmó consultando la NASA directamente | Detectarlo con `isPlaceholderApod()`, cachearlo poco tiempo, permitir imágenes de `science.nasa.gov` y mostrar un aviso en la UI |
 | Textos con caracteres rotos ("JesÃºs") | Revisión del JSON completo | Reparar la codificación (Latin-1 → UTF-8, hasta 3 pasadas) al normalizar la respuesta |
 | La API clásica devuelve contenido genérico; el nuevo feed oficial no está documentado públicamente (la guía de Notion requiere JavaScript) | La app no mostraba nada; revisión del README de `nasa/apod-api` | Documentar el feed `science.nasa.gov/wp-json/wp/v2/apod-basic` probándolo directamente (fechas en formato YYMMDD, máximo 25 por página, HTML en los textos, video dentro de `basic_html`) y adaptar `lib/apod.ts` manteniendo la interfaz |
+| Al volver a la galería, el botón "Foto aleatoria" seguía mostrando el loader | Lo detecté probando la navegación de ida y vuelta | Next.js 16 conserva las páginas ocultas con `<Activity>`; los estados transitorios se reinician en la limpieza de un `useLayoutEffect` |
+| El lint de React marcó `setState` dentro de `useEffect` (`react-hooks/set-state-in-effect`) | `npm run lint` | Un solo estado `boolean \| null` sincronizado con `localStorage` por suscripción, y un `ref` para aplicar al `<input>` la fecha máxima dependiente del reloj |
+| Un botón de favorito dentro de una tarjeta que es enlace | Revisión del HTML: un `<button>` dentro de un `<a>` es inválido | Poner el corazón como hermano del enlace, superpuesto con `absolute` |
 | `priority` de `next/image` deprecado en Next.js 16 | Documentación de `next/image` | Usar `preload` |
 | `fetch` con `next.revalidate` ya no aplica con Cache Components | Documentación de Next.js 16 | `'use cache'` + `cacheLife('hours')`, y `cacheLife('seconds')` cuando hay error |
 | _(tu desafío real)_ | | |
